@@ -25,7 +25,7 @@ module Database.Beam.Postgres.Connection
 
   , postgresUriSyntax ) where
 
-import           Control.Exception (SomeException(..), throwIO)
+import           Control.Exception (SomeException(..), displayException, throwIO)
 import           Control.Monad.Base (MonadBase(..))
 import           Control.Monad.Free.Church
 import           Control.Monad.IO.Class
@@ -61,7 +61,8 @@ import qualified Control.Monad.Fail as Fail
 import           Data.ByteString (ByteString)
 import           Data.ByteString.Builder (toLazyByteString, byteString)
 import qualified Data.ByteString.Lazy as BL
-import           Data.Maybe (listToMaybe, fromMaybe)
+import           Data.List (intercalate)
+import           Data.Maybe (mapMaybe)
 import           Data.Proxy
 import           Data.String
 import qualified Data.Text as T
@@ -144,23 +145,39 @@ runPgRowReader conn rowIdx res fields (FromBackendRowM readRow) =
          res' <- Pg.runConversion (Pg.fromField field fieldValue) conn
          case res' of
            Pg.Errors errs ->
-             let err = fromMaybe (ColumnErrorInternal "Column parse failed with unknown exception") $
-                       listToMaybe $
-                       do SomeException e <- errs
-                          Just pgErr <- pure (cast e)
-                          case pgErr of
-                            Pg.ConversionFailed { Pg.errSQLType = sql
-                                                , Pg.errHaskellType = hs
-                                                , Pg.errMessage = msg
-                                                , Pg.errSQLField = errField } ->
-                              pure (ColumnTypeMismatch hs sql ("Conversion failed for field'" <> errField <> "': " <> msg))
-                            Pg.Incompatible { Pg.errSQLType = sql
-                                            , Pg.errHaskellType = hs
-                                            , Pg.errMessage = msg
-                                            , Pg.errSQLField = errField } ->
-                              pure (ColumnTypeMismatch hs sql ("Incompatible field: '" <> errField <> "': " <> msg))
-                            Pg.UnexpectedNull {} ->
-                              pure ColumnUnexpectedNull
+             let -- Try to extract structured PostgreSQL errors
+                 pgErrors = mapMaybe toPgError errs
+                 -- For any exceptions that aren't PostgreSQL ResultErrors, show their message
+                 otherErrors = [displayException e | SomeException e <- errs, not (isPgResultError e)]
+
+                 toPgError (SomeException e) = do
+                   pgErr <- cast e
+                   case pgErr of
+                     Pg.ConversionFailed { Pg.errSQLType = sql
+                                         , Pg.errHaskellType = hs
+                                         , Pg.errMessage = msg
+                                         , Pg.errSQLField = errField } ->
+                       pure (ColumnTypeMismatch hs sql ("Conversion failed for field '" <> errField <> "': " <> msg))
+                     Pg.Incompatible { Pg.errSQLType = sql
+                                     , Pg.errHaskellType = hs
+                                     , Pg.errMessage = msg
+                                     , Pg.errSQLField = errField } ->
+                       pure (ColumnTypeMismatch hs sql ("Incompatible field '" <> errField <> "': " <> msg))
+                     Pg.UnexpectedNull {} ->
+                       pure ColumnUnexpectedNull
+
+                 isPgResultError e = case cast e of
+                   Just (Pg.ConversionFailed {}) -> True
+                   Just (Pg.Incompatible {}) -> True
+                   Just (Pg.UnexpectedNull {}) -> True
+                   Nothing -> False
+
+                 err = case (pgErrors, otherErrors) of
+                   (e:_, _) -> e  -- Prefer structured PostgreSQL errors
+                   ([], msgs) -> ColumnErrorInternal $
+                     case msgs of
+                       [] -> "Column parse failed with no error details"
+                       _  -> "Column parse failed: " <> intercalate "; " msgs
              in pure (Left (BeamRowReadError (Just (fromIntegral curCol)) err))
            Pg.Ok x -> next' x (curCol + 1) colCount remainingFields
 
