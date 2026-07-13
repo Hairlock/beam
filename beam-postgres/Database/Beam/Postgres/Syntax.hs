@@ -821,8 +821,14 @@ instance IsSql92ExpressionSyntax PgExpressionSyntax where
   overlapsE = pgBinOp "OVERLAPS"
   eqE = pgCompOp "="
   neqE = pgCompOp "<>"
-  eqMaybeE a b _ = pgBinOp "IS NOT DISTINCT FROM" a b
-  neqMaybeE a b _ = pgBinOp "IS DISTINCT FROM" a b
+  -- Craftflow: use standard = instead of IS NOT DISTINCT FROM.
+  -- INDISTINCT prevents hash/merge joins and index usage in PG, causing
+  -- 100-1000x slower queries on nullable FK joins. Standard = is correct
+  -- for WHERE clauses (NULL rows get filtered, which is the desired behavior).
+  -- For the rare case where NULL-safe equality is needed, use an explicit
+  -- isNotDistinctFrom_ helper instead.
+  eqMaybeE a b _ = pgBinOp "=" a b
+  neqMaybeE a b _ = pgBinOp "<>" a b
   ltE = pgCompOp "<"
   gtE = pgCompOp ">"
   leE = pgCompOp "<="
