@@ -827,8 +827,18 @@ instance IsSql92ExpressionSyntax PgExpressionSyntax where
   -- for WHERE clauses (NULL rows get filtered, which is the desired behavior).
   -- For the rare case where NULL-safe equality is needed, use an explicit
   -- isNotDistinctFrom_ helper instead.
-  eqMaybeE a b _ = pgBinOp "=" a b
-  neqMaybeE a b _ = pgBinOp "<>" a b
+  --
+  -- NULL literal detection: val_ Nothing renders to exactly pgNullExpr_.
+  -- We detect this and emit IS NULL / IS NOT NULL instead of = NULL / <> NULL,
+  -- since col = NULL is always false in SQL (NULL is not equal to anything).
+  eqMaybeE a b _
+    | b == pgNullExpr_ = pgPostFix "IS NULL" a
+    | a == pgNullExpr_ = pgPostFix "IS NULL" b
+    | otherwise = pgBinOp "=" a b
+  neqMaybeE a b _
+    | b == pgNullExpr_ = pgPostFix "IS NOT NULL" a
+    | a == pgNullExpr_ = pgPostFix "IS NOT NULL" b
+    | otherwise = pgBinOp "<>" a b
   ltE = pgCompOp "<"
   gtE = pgCompOp ">"
   leE = pgCompOp "<="
@@ -1425,6 +1435,11 @@ pgPostFix op a =
 pgUnOp op a =
   PgExpressionSyntax $
   emit (op <> "(") <> fromPgExpression a <> emit ")"
+
+-- | The SQL expression for a literal NULL value, as rendered by val_ Nothing.
+-- Used by eqMaybeE/neqMaybeE to detect NULL operands and emit IS NULL / IS NOT NULL.
+pgNullExpr_ :: PgExpressionSyntax
+pgNullExpr_ = coerce (defaultPgValueSyntax Pg.Null)
 
 pgJoin :: ByteString -> PgFromSyntax -> PgFromSyntax -> Maybe PgExpressionSyntax -> PgFromSyntax
 pgJoin joinType a b Nothing =
